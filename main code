@@ -1,0 +1,632 @@
+import pandas as pd
+import numpy as np
+import pandas as pd
+import numpy as np
+import openpyxl as op
+import math
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+from scipy import stats
+from scipy import optimize
+from scipy.optimize import minimize
+from scipy.special import gammaln  
+from scipy.stats import t
+
+data = pd.read_excel("Data_GroupAssignment1.xlsx")
+
+# Print summary statistics
+print("\nSummary Statistics:")
+print(data.head())
+print(data.describe())
+
+print(data['Returns'].head())
+
+# Question 2
+
+def newsimpact(x, delta, gamma):
+    sigma_squared = []
+    for t in range(1, len(x)):
+        sigma_squared.append((0.4 + delta * math.tanh(-gamma * x[t-1])) * x[t-1]**2)
+    return sigma_squared
+
+x1 = np.linspace(-5, 5, 200)
+
+gamma1 = [0.01, 0.1, 1]
+delta1 = [0.3, 0.1, 0, -0.3]
+
+results = {}
+for delta in delta1:
+    results[delta] = {}
+    for gamma in gamma1: 
+        results[delta][gamma] = newsimpact(x1, delta, gamma)
+
+fig, axs = plt.subplots(2,2, figsize=(9, 9))
+axs = axs.flatten()
+
+colors = ['r', 'g', 'b']
+
+for i, delta in enumerate(delta1):
+    ax = axs[i]
+    for j, gamma in enumerate(gamma1): 
+        y = results[delta][gamma]
+        ax.plot(x1[:-1], y, color=colors[j], label=f'γ = {gamma}')
+
+    ax.set_title(f'δ = {delta}')
+    ax.set_xlabel('Previous Return')
+    ax.set_ylabel('Impact on Volatility (sigma_t^2)')
+    ax.legend()
+    ax.grid(True)
+    ax.set_xlim(-5, 5)
+    ax.set_ylim(bottom=0)
+
+plt.tight_layout()
+plt.show()
+
+# Question 3
+
+stocks = ['PFE', 'JNJ', 'MRK', 'AAPL']
+stock_data = {stock: data[data['Ticker Symbol'] == stock] for stock in stocks}
+
+def calculate_stats(series):
+    return pd.Series({
+        'count': series.count(),
+        'mean': series.mean(),
+        'median': series.median(),
+        'std': series.std(),
+        'skew': series.skew(),
+        'kurtosis': stats.kurtosis(series),
+        'min': series.min(),
+        'max': series.max()
+    })
+
+desc_stats = pd.DataFrame({stock: calculate_stats(stock_data[stock]['Returns']) for stock in stocks})
+
+# Adjust kurtosis to excess kurtosis
+desc_stats.loc['kurtosis'] -= 3
+
+# Format the statistics
+desc_stats.loc['mean':'std'] *= 100
+desc_stats = desc_stats.round(3)
+desc_stats.index = ['Observations', 'Mean', 'Median', 'Std Dev', 'Skewness', 'Excess Kurtosis', 'Minimum', 'Maximum']
+
+# Transpose the DataFrame
+desc_stats = desc_stats.T
+
+print("\nDescriptive Statistics:")
+print(desc_stats.to_string())
+
+latex_table = desc_stats.to_latex(
+    index = True,
+    caption = 'Descriptive Statistics',
+    label = "tab:desc_stats",
+    float_format="%.3f",
+    column_format="l" + "r" * len(desc_stats.columns)
+)
+
+print("\nLaTeX Table:")
+print(latex_table)
+
+
+# Creating the plots with returns for each stock
+fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+axs = axs.flatten()
+
+for i, stock in enumerate(stocks):
+    ax = axs[i]
+    stock_data[stock].plot(x='Names Date', y='Returns', ax=ax, legend=False, linewidth=1.5)
+    ax.set_title(f'{stock} Returns')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Returns (%)')
+    ax.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Extract relevant columns
+data = data[['Ticker Symbol', 'Returns']]
+
+# Get a list of unique stocks
+stocks = data['Ticker Symbol'].unique()
+
+# Extract stock data for the first 2500 observations for each stock
+stock_data = {stock: data[data['Ticker Symbol'] == stock]['Returns'].values[:2500] for stock in stocks}
+
+# Convert the dictionary to a DataFrame
+stock_data = pd.DataFrame(stock_data)
+
+#question 4
+# GARCH: no mean effect and no leverage (λ = 0; δ, γ = 0)
+def garch(mu, omega, alpha, beta, Returns):
+    T = len(Returns)
+    sigma_t = np.zeros(T)
+    sigma_t[0] = np.var(Returns[:50])
+    epsilon = 1e-8  # Small positive value to avoid log(0)
+    for t in range(1, T):
+        sigma_t[t] = omega + alpha * ((Returns[t-1] - mu) / np.sqrt(sigma_t[t-1]))**2 + beta * sigma_t[t-1]
+        sigma_t[t] = max(sigma_t[t], epsilon)  # Ensure sigma_t is positive
+        
+    return sigma_t
+
+def garch_log_likelihood(params, Returns):
+    mu, omega, alpha, beta, nu = params
+    T = len(Returns)
+    sigma_t = garch(mu, omega, alpha, beta, Returns)
+
+    # Initialize the log likelihood
+    log_likelihood = 0
+
+    for t in range(0, T-1):
+        # Calculate standardized residuals (epsilon)
+        epsilon = (Returns[t] - mu) / np.sqrt(sigma_t[t])
+        
+        # Compute log PDF for this time step
+        log_pdf = (gammaln((nu + 1) / 2) - gammaln(nu / 2)
+                    - 0.5 * np.log(nu * np.pi) - 0.5 * np.log(sigma_t[t])
+                    - ((nu + 1) / 2) * np.log(1 + (epsilon**2 / nu)))
+        
+        log_likelihood += log_pdf
+
+    return -log_likelihood
+
+test_data_AAPL = stock_data['AAPL'].values * 100
+theta_hypothetical = (0.154, 0.038, 0.090, 0.873, 4.146)
+log_likelihood_value = garch_log_likelihood(theta_hypothetical, test_data_AAPL)
+
+print("Log-Likelihood Value for AAPL:", log_likelihood_value)
+
+initial_params = (0.154, 0.038, 0.090, 0.873, 4.146)
+
+# Optimization function
+def optimize_parameters(initial_params, Returns):
+       
+    # Use 'L-BFGS-B' method for constrained optimization
+    result = minimize(garch_log_likelihood, initial_params, args=(Returns,), method='L-BFGS-B',
+                      bounds=[(1e-6, None), (1e-6, 0.9999), (1e-6, 0.9999), (1e-6, 0.9999), (2.1, 100)])
+    
+    return result
+
+# GARCH-M: mean effect and no leverage
+def garch_m(mu, lambda1, omega, alpha, beta, Returns):
+    T = len(Returns)
+    sigma_t = np.zeros(T)
+    sigma_t[0] = np.var(Returns[:50])
+    epsilon = 1e-8
+    for t in range(1, T):
+        sigma_t[t] = omega + alpha * ((Returns[t-1] - mu - lambda1 * sigma_t[t-1]) / np.sqrt(sigma_t[t-1]))**2 + beta * sigma_t[t-1]
+        sigma_t[t] = max(sigma_t[t], epsilon)
+    return sigma_t
+
+def garch_m_log_likelihood(params, Returns):
+    mu, omega, lambda1, alpha, beta, nu = params
+    T = len(Returns)
+    sigma_t = garch_m(mu, lambda1, omega, alpha, beta, Returns)
+
+    # Initialize the log likelihood
+    log_likelihood = 0
+
+    for t in range(0, T-1):
+        # Calculate standardized residuals (epsilon)
+        epsilon = (Returns[t] - mu) / np.sqrt(sigma_t[t])
+        
+        # Compute log PDF for this time step
+        log_pdf = (gammaln((nu + 1) / 2) - gammaln(nu / 2)
+                    - 0.5 * np.log(nu * np.pi) - 0.5 * np.log(sigma_t[t])
+                    - ((nu + 1) / 2) * np.log(1 + (epsilon**2 / nu)))
+        
+        log_likelihood += log_pdf
+
+    return -log_likelihood
+
+initial_params_garch_m = (0.154, 0.1, 0.038, 0.090, 0.873, 4.146)
+
+def optimize_garch_m(initial_params_garch_m, returns):
+    # Adjusted bounds for GARCH-M
+    bounds = [(None, None),  # mu
+              (1e-6, None),  # lambda1
+              (1e-6, 0.9999),  # omega
+              (1e-6, 0.9999),  # alpha
+              (1e-6, 0.9999),  # beta
+              (2.1, 100)]  # nu
+    
+    result = minimize(garch_m_log_likelihood, initial_params_garch_m, args=(returns,), method='L-BFGS-B',
+                      bounds=bounds)
+    return result
+
+# GARCH-M-L: mean effect and leverage (λ != 0; δ, γ != 0) with penalized log-likelihood
+def garch_m_l(mu, lambda1, omega, alpha, beta, delta, gamma, Returns):
+    T = len(Returns)
+    sigma_t = np.zeros(T)
+    sigma_t[0] = np.var(Returns[:50])
+    epsilon = 1e-8  # Small positive value to avoid log(0)
+    for t in range(1, T):
+        sigma_t[t] = omega + (alpha + delta * np.tanh(-gamma * Returns[t-1])) * ((Returns[t-1] - mu - lambda1 * sigma_t[t-1]) / np.sqrt(sigma_t[t-1]))**2 + beta * sigma_t[t-1]
+        sigma_t[t] = max(sigma_t[t], epsilon)  # Ensure sigma_t is positive
+    return sigma_t
+
+def garch_m_l_log_likelihood(params, Returns):
+    mu, lambda1, omega, alpha, beta, delta, gamma, nu = params
+    T = len(Returns)
+    sigma_t = garch_m_l(mu, lambda1, omega, alpha, beta, delta, gamma, Returns)
+
+    # Initialize the log likelihood
+    log_likelihood = 0
+
+    for t in range(0, T-1):
+        # Calculate standardized residuals (epsilon)
+        epsilon = (Returns[t] - mu - lambda1 * sigma_t[t-1]) / np.sqrt(sigma_t[t])
+        
+        # Compute log PDF for this time step
+        log_pdf = (gammaln((nu + 1) / 2) - gammaln(nu / 2)
+                    - 0.5 * np.log(nu * np.pi) - 0.5 * np.log(sigma_t[t])
+                    - ((nu + 1) / 2) * np.log(1 + (epsilon**2 / nu))) -0.001*gamma**2
+        
+        log_likelihood += log_pdf
+
+    return -log_likelihood
+
+initial_params_garch_m_l = (0.154, 0.1, 0.038, 0.090, 0.873, 0.1, 0.1, 4.146)
+
+def optimize_garch_m_l(initial_params_m_l, returns):
+    # Adjusted bounds for GARCH-M-L
+    bounds = [(None, None),  # mu
+              (1e-6, None),  # lambda1
+              (1e-6, None),  # omega
+              (1e-6, 0.9999),  # alpha
+              (1e-6, 0.9999),  # beta
+              (1e-6, None),  # delta
+              (1e-6, None),  # gamma
+              (2.1, 100)]  # nu
+    
+    result = minimize(garch_m_l_log_likelihood, initial_params_m_l, args=(returns,), method='L-BFGS-B',
+                      bounds=bounds)
+    return result
+
+
+# Test data for AAPL
+test_data_AAPL = stock_data['AAPL'].values* 100
+# Test data for JNJ
+test_data_JNJ = stock_data['JNJ'].values* 100
+# Test data for MRK
+test_data_MRK = stock_data['MRK'].values* 100
+# Test data for PFE
+test_data_PFE = stock_data['PFE'].values* 100
+
+
+#M1
+# Optimize parameters
+optimization_result_AAPL_M1 = optimize_parameters(initial_params, test_data_AAPL)
+# Optimize parameters
+optimization_result_JNJ_M1 = optimize_parameters(initial_params, test_data_JNJ)
+# Optimize parameters
+optimization_result_MRK_M1 = optimize_parameters(initial_params, test_data_MRK)
+# Optimize parameters
+optimization_result_PFE_M1 = optimize_parameters(initial_params, test_data_PFE)
+
+# Extract optimized parameters
+optimized_params_AAPL_M1 = optimization_result_AAPL_M1.x
+# Extract optimized parameters
+optimized_params_JNJ_M1 = optimization_result_JNJ_M1.x
+# Extract optimized parameters
+optimized_params_MRK_M1 = optimization_result_MRK_M1.x
+# Extract optimized parameters
+optimized_params_PFE_M1 = optimization_result_PFE_M1.x
+
+print("M1 Optimized Parameters AAPL:", optimized_params_AAPL_M1)
+print("_M1Log-Likelihood at Optimized Parameters AAPL:", -optimization_result_AAPL_M1.fun)
+print("M1 Optimized Parameters JNJ:", optimized_params_JNJ_M1)
+print("_M1Log-Likelihood at Optimized Parameters JNJ:", -optimization_result_JNJ_M1.fun)
+print("_M1Optimized Parameters MRK:", optimized_params_MRK_M1)
+print("_M1Log-Likelihood at Optimized Parameters MRK:", -optimization_result_MRK_M1.fun)
+print("_M1Optimized Parameters PFE:", optimized_params_PFE_M1)
+print("_M1Log-Likelihood at Optimized Parameters PFE:", -optimization_result_PFE_M1.fun)
+
+#M2
+# Optimize parameters
+optimization_result_AAPL_M2 = optimize_garch_m(initial_params_garch_m, test_data_AAPL)
+# Optimize parameters
+optimization_result_JNJ_M2 = optimize_garch_m(initial_params_garch_m, test_data_JNJ)
+# Optimize parameters
+optimization_result_MRK_M2 = optimize_garch_m(initial_params_garch_m, test_data_MRK)
+# Optimize parameters
+optimization_result_PFE_M2 = optimize_garch_m(initial_params_garch_m, test_data_PFE)
+
+# Extract optimized parameters
+optimize_garch_m_AAPL_M2 = optimization_result_AAPL_M2.x
+# Extract optimized parameters
+optimize_garch_m_JNJ_M2 = optimization_result_JNJ_M2.x
+# Extract optimized parameters
+optimize_garch_m_MRK_M2 = optimization_result_MRK_M2.x
+# Extract optimized parameters
+optimize_garch_m_PFE_M2 = optimization_result_PFE_M2.x
+
+print("M2 Optimized Parameters AAPL:", optimize_garch_m_AAPL_M2)
+print("M2 Log-Likelihood at Optimized Parameters AAPL:", -optimization_result_AAPL_M2.fun)
+print("M2 Optimized Parameters JNJ:", optimize_garch_m_JNJ_M2)
+print("M2 Log-Likelihood at Optimized Parameters JNJ:", -optimization_result_JNJ_M2.fun)
+print("M2 Optimized Parameters MRK:", optimize_garch_m_MRK_M2)
+print("M2 Log-Likelihood at Optimized Parameters MRK:", -optimization_result_MRK_M2.fun)
+print("M2 Optimized Parameters PFE:", optimize_garch_m_PFE_M2)
+print("M2 Log-Likelihood at Optimized Parameters PFE:", -optimization_result_PFE_M2.fun)
+
+#M3
+# Optimize parameters
+optimization_result_AAPL_M3 = optimize_garch_m_l(initial_params_garch_m_l, test_data_AAPL)
+# Optimize parameters
+optimization_result_JNJ_M3 = optimize_garch_m_l(initial_params_garch_m_l, test_data_JNJ)
+# Optimize parameters
+optimization_result_MRK_M3 = optimize_garch_m_l(initial_params_garch_m_l, test_data_MRK)
+# Optimize parameters
+optimization_result_PFE_M3 = optimize_garch_m_l(initial_params_garch_m_l, test_data_PFE)
+
+# Extract optimized parameters
+optimize_garch_AAPL_M3 = optimization_result_AAPL_M3.x
+# Extract optimized parameters
+optimize_garch_JNJ_M3 = optimization_result_JNJ_M3.x
+# Extract optimized parameters
+optimize_garch_MRK_M3 = optimization_result_MRK_M3.x
+# Extract optimized parameters
+optimize_garch_PFE_M3 = optimization_result_PFE_M3.x
+
+print("M3 Optimized Parameters AAPL:", optimize_garch_AAPL_M3)
+print("M3 Log-Likelihood at Optimized Parameters AAPL:", -optimization_result_AAPL_M3.fun)
+print("M3 Optimized Parameters JNJ:", optimize_garch_JNJ_M3)
+print("M3 Log-Likelihood at Optimized Parameters JNJ:", -optimization_result_JNJ_M3.fun)
+print("M3 Optimized Parameters MRK:", optimize_garch_MRK_M3)
+print("M3 Log-Likelihood at Optimized Parameters MRK:", -optimization_result_MRK_M3.fun)
+print("M3 Optimized Parameters PFE:", optimize_garch_PFE_M3)
+print("M3 Log-Likelihood at Optimized Parameters PFE:", -optimization_result_PFE_M3.fun)
+
+# Function to compute AIC and BIC
+def compute_aic_bic(log_likelihood, num_params, n):
+    aic = 2 * num_params - 2 * log_likelihood
+    bic = np.log(n) * num_params - 2 * log_likelihood
+    return aic, bic
+
+# Number of observations for AAPL, JNJ, MRK, PFE
+n_AAPL = len(test_data_AAPL)
+n_JNJ = len(test_data_JNJ)
+n_MRK = len(test_data_MRK)
+n_PFE = len(test_data_PFE)
+
+# Store results
+results = []
+
+# Model 1 (GARCH)
+num_params_M1 = len(initial_params)
+aic_bic_AAPL_M1 = compute_aic_bic(-optimization_result_AAPL_M1.fun, num_params_M1, n_AAPL)
+aic_bic_JNJ_M1 = compute_aic_bic(-optimization_result_JNJ_M1.fun, num_params_M1, n_JNJ)
+aic_bic_MRK_M1 = compute_aic_bic(-optimization_result_MRK_M1.fun, num_params_M1, n_MRK)
+aic_bic_PFE_M1 = compute_aic_bic(-optimization_result_PFE_M1.fun, num_params_M1, n_PFE)
+
+results.append(["AAPL", "M1", aic_bic_AAPL_M1[0], aic_bic_AAPL_M1[1]])
+results.append(["JNJ", "M1", aic_bic_JNJ_M1[0], aic_bic_JNJ_M1[1]])
+results.append(["MRK", "M1", aic_bic_MRK_M1[0], aic_bic_MRK_M1[1]])
+results.append(["PFE", "M1", aic_bic_PFE_M1[0], aic_bic_PFE_M1[1]])
+
+# Model 2 (GARCH-M)
+num_params_M2 = len(initial_params_garch_m)
+aic_bic_AAPL_M2 = compute_aic_bic(-optimization_result_AAPL_M2.fun, num_params_M2, n_AAPL)
+aic_bic_JNJ_M2 = compute_aic_bic(-optimization_result_JNJ_M2.fun, num_params_M2, n_JNJ)
+aic_bic_MRK_M2 = compute_aic_bic(-optimization_result_MRK_M2.fun, num_params_M2, n_MRK)
+aic_bic_PFE_M2 = compute_aic_bic(-optimization_result_PFE_M2.fun, num_params_M2, n_PFE)
+
+results.append(["AAPL", "M2", aic_bic_AAPL_M2[0], aic_bic_AAPL_M2[1]])
+results.append(["JNJ", "M2", aic_bic_JNJ_M2[0], aic_bic_JNJ_M2[1]])
+results.append(["MRK", "M2", aic_bic_MRK_M2[0], aic_bic_MRK_M2[1]])
+results.append(["PFE", "M2", aic_bic_PFE_M2[0], aic_bic_PFE_M2[1]])
+
+# Model 3 (GARCH-M-L)
+num_params_M3 = len(initial_params_garch_m_l)
+aic_bic_AAPL_M3 = compute_aic_bic(-optimization_result_AAPL_M3.fun, num_params_M3, n_AAPL)
+aic_bic_JNJ_M3 = compute_aic_bic(-optimization_result_JNJ_M3.fun, num_params_M3, n_JNJ)
+aic_bic_MRK_M3 = compute_aic_bic(-optimization_result_MRK_M3.fun, num_params_M3, n_MRK)
+aic_bic_PFE_M3 = compute_aic_bic(-optimization_result_PFE_M3.fun, num_params_M3, n_PFE)
+
+results.append(["AAPL", "M3", aic_bic_AAPL_M3[0], aic_bic_AAPL_M3[1]])
+results.append(["JNJ", "M3", aic_bic_JNJ_M3[0], aic_bic_JNJ_M3[1]])
+results.append(["MRK", "M3", aic_bic_MRK_M3[0], aic_bic_MRK_M3[1]])
+results.append(["PFE", "M3", aic_bic_PFE_M3[0], aic_bic_PFE_M3[1]])
+
+# Convert results to DataFrame and print
+results_df = pd.DataFrame(results, columns=["Stock", "Model", "AIC", "BIC"])
+print("\nAIC and BIC Results:")
+print(tabulate(results_df, headers='keys', tablefmt='psql'))
+
+################### QUESTION 5 (I) #############################
+
+# Define the impact curve for M1 (GARCH)
+def garch_impact(x_t_1, alpha, omega):
+    return omega + alpha * x_t_1**2
+
+# Define the impact curve for M2 (GARCH-M)
+def garch_m_impact(x_t_1, alpha, mu, lambda1, sigma_t_1):
+    return alpha * ((x_t_1 - mu - lambda1 * sigma_t_1**2) / sigma_t_1) ** 2
+
+# Define the impact curve for M3 (GARCH-M-L with leverage)
+def garch_m_l_impact(x_t_1, alpha, delta, gamma, mu, lambda1, sigma_t_1):
+    return (alpha + delta * np.tanh(-gamma * x_t_1)) * ((x_t_1 - mu - lambda1 * sigma_t_1**2) / sigma_t_1) ** 2
+
+# Parameters for each stock
+# JNJ
+params_JNJ = {
+    "M1": {"alpha": 0.02547, "omega": 0.0000},
+    "M2": {"alpha": 0.02255, "mu": 0.06161, "lambda1": 0.00000},
+    "M3": {"alpha": 0.02555, "delta": 0.01723, "gamma": 1.21563, "mu": 0.03014, "lambda1": 0.06965}
+}
+
+# MRK
+params_MRK = {
+    "M1": {"alpha": 0.03899, "omega": 0.01420},
+    "M2": {"alpha": 0.03096, "mu": 0.05575, "lambda1": 0.002307},
+    "M3": {"alpha": 0.03997, "delta": 0.03802, "gamma": 6.18130, "mu": -0.05664, "lambda1": 0.12895}
+}
+
+# PFE
+params_PFE = {
+    "M1": {"alpha": 0.04273, "omega": 0.00000},
+    "M2": {"alpha": 0.04681, "mu": 0.6583, "lambda1": 0.4683},
+    "M3": {"alpha": 0.05616, "delta": 0.09916, "gamma": 0.10438, "mu": -0.00255, "lambda1": 0.09483}
+}
+
+# Previous period volatility (sigma_t_1), assumed to be constant for simplicity
+sigma_t_1 = 1.0
+
+# Generate a range of past returns (x_{t-1})
+x_t_1 = np.linspace(-5, 5, 200)
+
+# Set up subplots in a 1x3 grid
+fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+
+# Stock names
+stock_names = ["JNJ", "MRK", "PFE"]
+params_stocks = [params_JNJ, params_MRK, params_PFE]
+
+# Loop through each stock and calculate impact curves
+for i, (stock, params) in enumerate(zip(stock_names, params_stocks)):
+    # Calculate impact curves for each model
+    impact_M1 = garch_impact(x_t_1, params["M1"]["alpha"], params["M1"]["omega"])
+    impact_M2 = garch_m_impact(x_t_1, params["M2"]["alpha"], params["M2"]["mu"], params["M2"]["lambda1"], sigma_t_1)
+    impact_M3 = garch_m_l_impact(x_t_1, params["M3"]["alpha"], params["M3"]["delta"], params["M3"]["gamma"], params["M3"]["mu"], params["M3"]["lambda1"], sigma_t_1)
+    
+    # Plot the curves for each stock in a separate subplot
+    axs[i].plot(x_t_1, impact_M1, label='M1 (GARCH)', color='blue')
+    axs[i].plot(x_t_1, impact_M2, label='M2 (GARCH-M)', color='orange')
+    axs[i].plot(x_t_1, impact_M3, label='M3 (GARCH-M-L)', color='green')
+
+    # Settings for each subplot
+    axs[i].set_title(f'News Impact Curves for {stock}')
+    axs[i].set_xlabel('Previous Return (x_{t-1})')
+    axs[i].set_ylabel('Impact on Volatility (sigma_t^2)')
+    axs[i].grid(True, linestyle='--', linewidth=0.5)
+    axs[i].legend()
+
+# Adjust layout to make sure plots fit well next to each other
+plt.tight_layout()
+plt.show()
+
+
+################ QUESTION 5 (II) ########################
+
+
+# Prepare stocks data
+stocks = {'JNJ': 'JNJ', 'MRK': 'MRK', 'PFE': 'PFE'}
+initial_params_garch_m_l = (0.154, 0.1, 0.038, 0.090, 0.873, 0.1, 0.1, 4.146)
+
+# Create a figure with 3 subplots
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+for i, stock in enumerate(stocks):
+    # Extract stock returns (first 3000 observations)
+    stock_returns = data[data['Ticker Symbol'] == stock]['Returns'].values[:3000]
+    stock_returns = stock_returns * 100  # Scale by 100
+
+    # Optimize GARCH-M-L parameters
+    optimization_result = optimize_garch_m_l(initial_params_garch_m_l, stock_returns)
+    optimized_params = optimization_result.x
+
+    # Now compute the filtered volatilities (sigma_t) using the optimized parameters
+    mu, lambda1, omega, alpha, beta, delta, gamma, nu = optimized_params
+    sigma_t = garch_m_l(mu, lambda1, omega, alpha, beta, delta, gamma, stock_returns)
+
+    # Plot the filtered volatilities and returns
+    axes[i].plot(stock_returns, label=f'{stock} Returns', color='lightgray', alpha=0.6)
+    axes[i].plot(sigma_t, label='Filtered Volatilities (Sigma)', color='blue', alpha=0.9)
+    axes[i].axvline(x=2500, color='black', linestyle='--', label='End of In-Sample')
+    
+    # Set title and labels for each plot
+    axes[i].set_title(f'{stock} Returns and Filtered Volatilities')
+    axes[i].set_xlabel('Time (Days)')
+    axes[i].set_ylabel('Values')
+    axes[i].legend()
+    axes[i].grid(True)
+
+# Adjust layout and show the plot
+plt.tight_layout()
+plt.show()
+
+################### Question 6 ###############################
+
+# Function to simulate returns and compute VaR for multiple steps ahead
+def simulate_var(mu_opt, sigma_t_0, omega_opt, alpha_opt, beta_opt, delta_opt, gamma_opt, lambda1_opt, nu_opt, num_steps, num_simulations, model='garch'):
+    simulated_compound_returns = []
+    for sim in range(num_simulations):
+        compound_return = 0
+        sigma_t_current = sigma_t_0
+        for step in range(num_steps):
+            epsilon = t.rvs(nu_opt)
+            if model == 'garch_m_l':
+                return_step = mu_opt + np.sqrt(sigma_t_current) * epsilon
+                sigma_t_next = omega_opt + (alpha_opt + delta_opt * np.tanh(-gamma_opt * return_step)) * \
+                               ((return_step - mu_opt - lambda1_opt * sigma_t_current) / np.sqrt(sigma_t_current))**2 + beta_opt * sigma_t_current
+            elif model == 'garch_m':
+                return_step = mu_opt + np.sqrt(sigma_t_current) * epsilon
+                sigma_t_next = omega_opt + alpha_opt * ((return_step - mu_opt - lambda1_opt * sigma_t_current) / np.sqrt(sigma_t_current))**2 + beta_opt * sigma_t_current
+            else:
+                return_step = mu_opt + np.sqrt(sigma_t_current) * epsilon
+                sigma_t_next = omega_opt + alpha_opt * ((return_step - mu_opt) / np.sqrt(sigma_t_current))**2 + beta_opt * sigma_t_current
+            compound_return += return_step
+            sigma_t_next = max(sigma_t_next, 1e-8)
+            sigma_t_current = sigma_t_next
+        simulated_compound_returns.append(compound_return)
+    return np.array(simulated_compound_returns)
+
+# Stocks to analyze
+stocks = ['JNJ', 'MRK', 'PFE']
+
+# Define the parameters for each model
+initial_params = (0.154, 0.038, 0.090, 0.873, 4.146)
+initial_params_garch_m = (0.154, 0.1, 0.038, 0.090, 0.873, 4.146)
+initial_params_garch_m_l = (0.154, 0.1, 0.038, 0.090, 0.873, 0.1, 0.1, 4.146)
+
+num_simulations = 10000
+steps_ahead = [1, 5, 20]
+confidence_levels = [0.01, 0.05, 0.10]
+
+# Loop through each stock
+for stock in stocks:
+    print(f"\n### Results for {stock} ###")
+    
+    # Filter the returns for the current stock
+    returns = data[data['Ticker Symbol'] == stock]['Returns'].values[:2500] * 100  # Rescale returns by 100
+    
+    # Optimize the parameters for each model
+    optimized_result_garch = optimize_parameters(initial_params, returns)
+    optimized_result_garch_m = optimize_garch_m(initial_params_garch_m, returns)
+    optimized_result_garch_m_l = optimize_garch_m_l(initial_params_garch_m_l, returns)
+
+    # Extract optimized parameters
+    mu_garch, omega_garch, alpha_garch, beta_garch, nu_garch = optimized_result_garch.x
+    mu_garch_m, omega_garch_m, lambda1_garch_m, alpha_garch_m, beta_garch_m, nu_garch_m = optimized_result_garch_m.x
+    mu_garch_m_l, lambda1_garch_m_l, omega_garch_m_l, alpha_garch_m_l, beta_garch_m_l, delta_garch_m_l, gamma_garch_m_l, nu_garch_m_l = optimized_result_garch_m_l.x
+
+    # Compute the conditional variances for each model up to January 4, 2021
+    sigma_t_garch = garch(mu_garch, omega_garch, alpha_garch, beta_garch, returns)[-1]
+    sigma_t_garch_m = garch_m(mu_garch_m, lambda1_garch_m, omega_garch_m, alpha_garch_m, beta_garch_m, returns)[-1]
+    sigma_t_garch_m_l = garch_m_l(mu_garch_m_l, lambda1_garch_m_l, omega_garch_m_l, alpha_garch_m_l, beta_garch_m_l, delta_garch_m_l, gamma_garch_m_l, returns)[-1]
+
+    # GARCH VaR
+    print(f"### GARCH Model for {stock} ###")
+    for step in steps_ahead:
+        simulated_returns_garch = simulate_var(mu_garch, sigma_t_garch, omega_garch, alpha_garch, beta_garch, None, None, None, nu_garch, step, num_simulations, model='garch')
+        print(f"\n{step}-step-ahead VaR for GARCH:")
+        for cl in confidence_levels:
+            VaR = -np.quantile(simulated_returns_garch, cl)
+            print(f"{step}-step-ahead VaR at {int(cl * 100)}% confidence level: {VaR}")
+
+    # GARCH-M VaR
+    print(f"\n### GARCH-M Model for {stock} ###")
+    for step in steps_ahead:
+        simulated_returns_garch_m = simulate_var(mu_garch_m, sigma_t_garch_m, omega_garch_m, alpha_garch_m, beta_garch_m, None, None, lambda1_garch_m, nu_garch_m, step, num_simulations, model='garch_m')
+        print(f"\n{step}-step-ahead VaR for GARCH-M:")
+        for cl in confidence_levels:
+            VaR = -np.quantile(simulated_returns_garch_m, cl)
+            print(f"{step}-step-ahead VaR at {int(cl * 100)}% confidence level: {VaR}")
+
+    # GARCH-M-L VaR
+    print(f"\n### GARCH-M-L Model for {stock} ###")
+    for step in steps_ahead:
+        simulated_returns_garch_m_l = simulate_var(mu_garch_m_l, sigma_t_garch_m_l, omega_garch_m_l, alpha_garch_m_l, beta_garch_m_l, delta_garch_m_l, gamma_garch_m_l, lambda1_garch_m_l, nu_garch_m_l, step, num_simulations, model='garch_m_l')
+        print(f"\n{step}-step-ahead VaR for GARCH-M-L:")
+        for cl in confidence_levels:
+            VaR = -np.quantile(simulated_returns_garch_m_l, cl)
+            print(f"{step}-step-ahead VaR at {int(cl * 100)}% confidence level: {VaR}")
